@@ -5,6 +5,14 @@ from typing import Literal
 
 torch.manual_seed(1)
 
+# ===== HYPERPARAMETERS =====
+
+TRAINING_DATA_PROPORTION = 0.9
+
+BLOCK_SIZE = 8 # what is the max number of tokens we can use as input for a prediction?
+               # NOTE: in a block size of n tokens, we will iterate our prediction on n-1 tokens
+BATCH_SIZE = 4 # how many independent sequences will we process in parallel?
+
 
 # ===== CORPUS RETRIEVAL =====
 # get the text corpus
@@ -14,9 +22,6 @@ with open('corpus.txt', 'r', encoding='utf-8') as f:
 # get the unique characters in the text (vocabulary set)
 chars = sorted(list(set(text)))
 vocab_size = len(chars)
-
-    # print(''.join(chars))
-    # print(vocab_size)
 
 
 # ===== TOKENISATION =====
@@ -34,40 +39,25 @@ def decode(l: list[int]) -> str:
     """ takes a list of int and outputs a str"""
     return "".join(int_to_char[i] for i in l)
 
-    # print(encode("hello"))
-    # print(decode(encode("hello")))
-
 
 # encode the entire corpus and split into train & test data
 encoded_corpus = torch.tensor(encode(text), dtype=torch.long)
-
-    # print(encoded_corpus.shape, encoded_corpus.dtype)
-    # print(encoded_corpus[:500])
-
-TRAINING_DATA_PROPORTION = 0.9
-
 n = int(TRAINING_DATA_PROPORTION * len(encoded_corpus))
 train_data = encoded_corpus[:n]
 test_data = encoded_corpus[n:]
-
-
-BLOCK_SIZE = 8 # what is the max number of tokens we can use as input for a prediction?
-               # NOTE: in a block size of n tokens, we will iterate our prediction on n-1 tokens
-BATCH_SIZE = 4 # how many independent sequences will we process in parallel?
 
 
 def get_batch(split: Literal["train", "test"]):
     # generate a batch of data of inputs x and targets y
     data = train_data if split == "train" else test_data
     ix = torch.randint(len(data) - BLOCK_SIZE, (BATCH_SIZE, )) # generates BATCH_SIZE random starting positions
-    x = torch.stack([data[i:i+BLOCK_SIZE] for i in ix]) # get the block of tokens to predict, for each starting point
+    x = torch.stack([data[i:i+BLOCK_SIZE] for i in ix]) # get the block of tokens to predict from, for each starting point
     y = torch.stack([data[i+1:i+BLOCK_SIZE+1] for i in ix]) # shift by 1, since n tokens should predict the n+1 token
     return x, y
 
-xb, yb = get_batch("train")
 
-    # print("INPUTS:\n", xb.shape, "\n", xb )
-    # print("TARGETS:\n", yb.shape, "\n", yb )
+# get numerous sequences of tokens (xb) and the corresponding n+1 target tokens (yb)
+xb, yb = get_batch("train")
 
 
 # ===== TRANSFORMER  =====
@@ -86,7 +76,15 @@ class BigramLanguageModel(nn.Module):
     def forward(self, idx: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """ 
         Generate logits for the next-token predictions. 
-        idx and targets are both (B= BATCH_SIZE, T= BLOCK_SIZE) tensor of integers 
+
+        params:
+        both are (B= BATCH_SIZE, T= BLOCK_SIZE) tensor of integers
+        - idx
+        - targets
+             
+
+        output: 
+
         """
 
         # gets the rows (i.e. logit scores for each possible vocab) in the lookup table for each input token (idx)
@@ -102,6 +100,25 @@ class BigramLanguageModel(nn.Module):
         loss = F.cross_entropy(logits, targets)
 
         return logits, loss
+
+    def generate(self, idx, max_new_tokens):
+        """
+        Given some tokens, repeatedly predict the next token, add it to the sequence, and repeat.
+        """
+        # idx is (B, T) array of indices in the current context
+        for _ in range(max_new_tokens):
+            # get the predictions
+            logits, loss = self(idx)
+            # focus only on the last time step
+            logits = logits[:, -1, :] # becomes (B,C)
+            # apply softmax to get probabilities
+            probs = F.softmax(logits, dim=-1) # (B, C)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
+            # append sampled index to the running sequence
+            idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
+        return idx
+            
 
 
 m = BigramLanguageModel(vocab_size)
