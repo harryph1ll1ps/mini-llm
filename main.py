@@ -11,7 +11,7 @@ TRAINING_DATA_PROPORTION = 0.9
 
 BLOCK_SIZE = 8 # what is the max number of tokens we can use as input for a prediction?
                # NOTE: in a block size of n tokens, we will iterate our prediction on n-1 tokens
-BATCH_SIZE = 4 # how many independent sequences will we process in parallel?
+BATCH_SIZE = 32 # how many independent sequences will we process in parallel?
 
 
 # ===== CORPUS RETRIEVAL =====
@@ -114,7 +114,11 @@ class BigramLanguageModel(nn.Module):
             logits, _ = self(token_sequence) 
 
             # focus only on the last time step (we only care about predicting the next token)
+            # NOTE: for a bigram model, it is silly that we pass in the full history when it only needs the nth token
+            #       however, it will generalise better to other models
             logits = logits[:, -1, :] # becomes (B,C)
+
+
 
             # apply softmax to convert scores into probabilities that sum to 1
             probs = F.softmax(logits, dim=-1) # (B, C)
@@ -132,5 +136,26 @@ class BigramLanguageModel(nn.Module):
 m = BigramLanguageModel(vocab_size)
 logits, loss = m.forward(xb, yb) 
 
-idx = torch.zeros((1,1), dtype=torch.long)
-print(decode(m.generate(idx, max_new_tokens=50)[0].tolist()))
+print(decode(m.generate(torch.zeros((1,1), dtype=torch.long), max_new_tokens=50)[0].tolist())) # produces random tokens
+
+
+# ===== TRAINING  =====
+
+# create a PyTorch optimizer
+optimizer = torch.optim.AdamW(m.parameters(), lr=1e-3)
+
+for steps in range(10000):
+
+    # sample a batch of data
+    xb, yb = get_batch("train")
+
+    # evaluate the loss
+    logits, loss = m(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+print(loss.item())
+
+print(decode(m.generate(torch.zeros((1,1), dtype=torch.long), max_new_tokens=50)[0].tolist())) # produces random tokens
+
