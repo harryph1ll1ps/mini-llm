@@ -51,8 +51,8 @@ def get_batch(split: Literal["train", "test"]):
     # generate a batch of data of inputs x and targets y
     data = train_data if split == "train" else test_data
     ix = torch.randint(len(data) - BLOCK_SIZE, (BATCH_SIZE, )) # generates BATCH_SIZE random starting positions
-    x = torch.stack([data[i:i+BLOCK_SIZE] for i in ix]) # get the block of tokens to predict from, for each starting point
-    y = torch.stack([data[i+1:i+BLOCK_SIZE+1] for i in ix]) # shift by 1, since n tokens should predict the n+1 token
+    x = torch.stack([data[i:i+BLOCK_SIZE] for i in ix]) # get the block of tokens to predict from, for each starting point (matrix)
+    y = torch.stack([data[i+1:i+BLOCK_SIZE+1] for i in ix]) # shift by 1, since n tokens should predict the n+1 token (matrix)
     return x, y
 
 
@@ -73,53 +73,64 @@ class BigramLanguageModel(nn.Module):
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
 
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_tokens: torch.Tensor, target_tokens: torch.Tensor=None) -> torch.Tensor:
         """ 
         Generate logits for the next-token predictions. 
 
         params:
         both are (B= BATCH_SIZE, T= BLOCK_SIZE) tensor of integers
-        - idx
-        - targets
+        - input_tokens
+        - target_tokens
              
 
         output: 
 
         """
+        # gets the rows (i.e. logit scores for each possible vocab) in the lookup table for each input token (input_tokens)
+        logits = self.token_embedding_table(input_tokens) # outputs a 3D tensor: (B= BATCH_SIZE, T= BLOCK_SIZE, C= VOCAB_SIZE)
 
-        # gets the rows (i.e. logit scores for each possible vocab) in the lookup table for each input token (idx)
-        logits = self.token_embedding_table(idx) # 3D tensor: (B= BATCH_SIZE, T= BLOCK_SIZE, C= VOCAB_SIZE)
+        if target_tokens is None:
+            loss = None
+        else:
+            # need to reshape because of the way pytorch expects cross_entropy() inputs
+            B, T, C = logits.shape
+            logits = logits.view(B*T, C)
+            target_tokens = target_tokens.view(B*T)
 
-
-        # need to reshape because of the way pytorch expects cross_entropy() inputs
-        B, T, C = logits.shape
-        logits = logits.view(B*T, C)
-        targets = targets.view(B*T)
-
-        # Negative Log Likelihood (NLL) loss
-        loss = F.cross_entropy(logits, targets)
+            # Negative Log Likelihood (NLL) loss
+            loss = F.cross_entropy(logits, target_tokens)
 
         return logits, loss
 
-    def generate(self, idx, max_new_tokens):
+    def generate(self, token_sequence, max_new_tokens):
         """
         Given some tokens, repeatedly predict the next token, add it to the sequence, and repeat.
+        This is inference/generation, not training. The weights are already trained.
         """
-        # idx is (B, T) array of indices in the current context
-        for _ in range(max_new_tokens):
-            # get the predictions
-            logits, loss = self(idx)
-            # focus only on the last time step
+        # token_sequence is (B, T) array of indices in the current context
+        for _ in range(max_new_tokens): # (1) the _ (2) the cat _ (3) the cat sat _ (4) the cat sat on _ ...
+
+            # calling self runs self.__call__() which does some processing, then calls forward()
+            logits, _ = self(token_sequence) 
+
+            # focus only on the last time step (we only care about predicting the next token)
             logits = logits[:, -1, :] # becomes (B,C)
-            # apply softmax to get probabilities
+
+            # apply softmax to convert scores into probabilities that sum to 1
             probs = F.softmax(logits, dim=-1) # (B, C)
-            # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
-            # append sampled index to the running sequence
-            idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
-        return idx
+
+            # randomly sampling from the distribution (not just taking highest probability token)
+            token_sequence_next = torch.multinomial(probs, num_samples=1) # (B, 1)
+
+            # append newly generated token to the end of the existing sequence
+            token_sequence = torch.cat((token_sequence, token_sequence_next), dim=1) # (B, T+1)
+
+        return token_sequence
             
 
 
 m = BigramLanguageModel(vocab_size)
 logits, loss = m.forward(xb, yb) 
+
+idx = torch.zeros((1,1), dtype=torch.long)
+print(decode(m.generate(idx, max_new_tokens=50)[0].tolist()))
