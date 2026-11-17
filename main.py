@@ -136,7 +136,7 @@ class BigramLanguageModel(nn.Module):
 m = BigramLanguageModel(vocab_size)
 logits, loss = m.forward(xb, yb) 
 
-print(decode(m.generate(torch.zeros((1,1), dtype=torch.long), max_new_tokens=50)[0].tolist())) # produces random tokens
+# print(decode(m.generate(torch.zeros((1,1), dtype=torch.long), max_new_tokens=50)[0].tolist())) # produces random tokens
 
 
 # ===== TRAINING  =====
@@ -157,5 +157,5 @@ for steps in range(10000):
 
 print(loss.item())
 
-print(decode(m.generate(torch.zeros((1,1), dtype=torch.long), max_new_tokens=50)[0].tolist())) # produces random tokens
+# print(decode(m.generate(torch.zeros((1,1), dtype=torch.long), max_new_tokens=50)[0].tolist())) # getting more readable
 
