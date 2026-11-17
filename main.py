@@ -7,11 +7,19 @@ torch.manual_seed(1)
 
 # ===== HYPERPARAMETERS =====
 
-TRAINING_DATA_PROPORTION = 0.9
-
+BATCH_SIZE = 32 # how many independent sequences will we process in parallel?
 BLOCK_SIZE = 8 # what is the max number of tokens we can use as input for a prediction?
                # NOTE: in a block size of n tokens, we will iterate our prediction on n-1 tokens
-BATCH_SIZE = 32 # how many independent sequences will we process in parallel?
+TRAINING_DATA_PROPORTION = 0.9
+MAX_ITERS = 5000
+EVAL_INTERVAL = 500
+LEARNING_RATE = 3e-4
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu" # run on gpu if available
+EVAL_ITERS = 200
+N_EMBD = 384
+N_HEAD = 6
+N_LAYER = 6
+DROPOUT = 0.2
 
 
 # ===== CORPUS RETRIEVAL =====
@@ -21,7 +29,7 @@ with open('corpus.txt', 'r', encoding='utf-8') as f:
 
 # get the unique characters in the text (vocabulary set)
 chars = sorted(list(set(text)))
-vocab_size = len(chars)
+VOCAB_SIZE = len(chars)
 
 
 # ===== TOKENISATION =====
@@ -40,7 +48,7 @@ def decode(l: list[int]) -> str:
     return "".join(int_to_char[i] for i in l)
 
 
-# encode the entire corpus and split into train & test data
+# split the encoded corpus into train and test data
 encoded_corpus = torch.tensor(encode(text), dtype=torch.long)
 n = int(TRAINING_DATA_PROPORTION * len(encoded_corpus))
 train_data = encoded_corpus[:n]
@@ -53,11 +61,42 @@ def get_batch(split: Literal["train", "test"]):
     ix = torch.randint(len(data) - BLOCK_SIZE, (BATCH_SIZE, )) # generates BATCH_SIZE random starting positions
     x = torch.stack([data[i:i+BLOCK_SIZE] for i in ix]) # get the block of tokens to predict from, for each starting point (matrix)
     y = torch.stack([data[i+1:i+BLOCK_SIZE+1] for i in ix]) # shift by 1, since n tokens should predict the n+1 token (matrix)
+    x,y = x.to(DEVICE), y.to(DEVICE) # move the tensors onto our computation device
     return x, y
+
+@torch.no_grad() # when running this fn, don't calculate gradients
+def estimate_loss():
+    """ 
+    take a number of random batches and avg their losses
+
+    returns: out = { "train": 1.52, "test": 1.68 }
+    
+    """
+    out = {}
+
+    # put the model in eval mode (some NN's behave differently)
+    model.eval()
+    for split in ["train", "test"]:
+        losses = torch.zeros(EVAL_ITERS) # [0, 0, 0, 0, 0, ..., 0]
+        for k in range(EVAL_ITERS):
+            X, Y = get_batch(split)
+            logits, loss = model(X, Y)
+            losses[k] = loss.item() # save the loss number into the array
+
+        # after calculating the loss on EVAL_ITERS predictions, take the mean
+        out[split] = losses.mean() 
+
+    model.train()
+    return out
+
 
 
 # get numerous sequences of tokens (xb) and the corresponding n+1 target tokens (yb)
 xb, yb = get_batch("train")
+
+
+
+
 
 
 # ===== TRANSFORMER  =====
@@ -67,27 +106,30 @@ xb, yb = get_batch("train")
 class BigramLanguageModel(nn.Module):
     """ A simple language model that predicts the next token from the current token. """
 
-    def __init__(self, vocab_size: int):
+    def __init__(self):
         super().__init__()
 
-        # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        # each token value (row) is mapped to an embedding (columns)
+        self.token_embedding_table = nn.Embedding(VOCAB_SIZE, N_EMBD)
+
+        # each token position (row) is mapped to an embedding (columns)
+        self.position_embedding_table = nn.Embedding(BLOCK_SIZE, N_EMBD)
+
+        # each embedding is then given likelihood scores across the vocab to predict the next token
+        self.lm_head = nn.Linear(N_EMBD, VOCAB_SIZE)
 
     def forward(self, input_tokens: torch.Tensor, target_tokens: torch.Tensor=None) -> torch.Tensor:
         """ 
         Generate logits for the next-token predictions. 
 
-        params:
-        both are (B= BATCH_SIZE, T= BLOCK_SIZE) tensor of integers
-        - input_tokens
-        - target_tokens
-             
-
-        output: 
-
         """
-        # gets the rows (i.e. logit scores for each possible vocab) in the lookup table for each input token (input_tokens)
-        logits = self.token_embedding_table(input_tokens) # outputs a 3D tensor: (B= BATCH_SIZE, T= BLOCK_SIZE, C= VOCAB_SIZE)
+
+        B, T = input_tokens.shape
+
+        tok_emb = self.token_embedding_table(input_tokens) # outputs a 3D tensor (B, T, C = N_EMBD)
+        pos_emb = self.position_embedding_table(torch.arrange(T, device=DEVICE)) # (T,C = N_EMBD)
+        x = tok_emb + pos_emb # (B, T, C)
+        logits = self.lm_head(x) # (B, T, C = VOCAB_SIZE)
 
         if target_tokens is None:
             loss = None
@@ -118,8 +160,6 @@ class BigramLanguageModel(nn.Module):
             #       however, it will generalise better to other models
             logits = logits[:, -1, :] # becomes (B,C)
 
-
-
             # apply softmax to convert scores into probabilities that sum to 1
             probs = F.softmax(logits, dim=-1) # (B, C)
 
@@ -132,30 +172,58 @@ class BigramLanguageModel(nn.Module):
         return token_sequence
             
 
-
-m = BigramLanguageModel(vocab_size)
-logits, loss = m.forward(xb, yb) 
-
-# print(decode(m.generate(torch.zeros((1,1), dtype=torch.long), max_new_tokens=50)[0].tolist())) # produces random tokens
-
+model = BigramLanguageModel()
+m = model.to(DEVICE)
 
 # ===== TRAINING  =====
 
 # create a PyTorch optimizer
-optimizer = torch.optim.AdamW(m.parameters(), lr=1e-3)
+optimizer = torch.optim.AdamW(m.parameters(), lr=LEARNING_RATE) # params are the embedding table weights (vocab size, vocab size)
 
-for steps in range(10000):
+
+for iter in range(MAX_ITERS):
+
+    # occasionally evaluate the loss on train and test sets
+    if iter % EVAL_INTERVAL == 0:
+        losses = estimate_loss()
+        print(f"step {iter}: train loss {losses['train']:.4f}, test loss {losses['test']:.4f}")
 
     # sample a batch of data
     xb, yb = get_batch("train")
 
     # evaluate the loss
-    logits, loss = m(xb, yb)
+    logits, loss = model(xb, yb)
+
+    # erases the gradients from the previous training step
     optimizer.zero_grad(set_to_none=True)
+
+    # calculating this steps gradients (how much should each weight move to reduce the loss)
     loss.backward()
+
+    # actually change all of the weights
     optimizer.step()
 
-print(loss.item())
+# context = torch.zeros((1,1), dtype=torch.long, device=DEVICE)
+# print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
 
-# print(decode(m.generate(torch.zeros((1,1), dtype=torch.long), max_new_tokens=50)[0].tolist())) # getting more readable
 
+# ATTENTION
+torch.manual_seed(1337)
+B,T,C = 4,8,2
+x = torch.randn(B,T,C)
+x.shape
+
+
+# VERY INEFFICIENT
+# take mean of channels from 1 to t
+xbow = torch.zeros((B,T,C))
+for b in range(B):
+    for t in range(T):
+        xprev = x[b, :t+1] # (t,C)
+        xbow[b,t] = torch.mean(xprev, 0)
+
+#HENCE WHY WE USE MATRIX MULT
+torch.manual_seed(42)
+a = torch.ones(3,3)
+b = torch.randint(0,10,(3,2)).float()
+c = a @ b
