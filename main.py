@@ -108,8 +108,8 @@ class BigramLanguageModel(nn.Module):
         # each token position (row) is mapped to an embedding (columns)
         self.position_embedding_table = nn.Embedding(BLOCK_SIZE, N_EMBD) # needed for attention
 
-        # initialises a weightght for each embedding cell (columns) across each vocab token (row) + bias
-        # it can then be used as a fn that runs logits =  x @ weightght.T + bias
+        # initialises a weight for each embedding cell (columns) across each vocab token (row) + bias
+        # it can then be used as a fn that runs: logits =  x @ weightght.T + bias
         self.lm_head = nn.Linear(N_EMBD, VOCAB_SIZE) # the final layer (head) of the lm (language model) that produces the predictions
 
     def forward(self, tok_sequence: torch.Tensor, target_tokens: torch.Tensor=None) -> torch.Tensor:
@@ -122,7 +122,7 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(pos) # (T, C = N_EMBD)
         x = tok_emb + pos_emb # (B, T, C = N_EMBD) - pos_emb gets repeated B times before adding
 
-        # runs on each of the B x T positions, and produces a logit (score) for each potential output token
+        # runs on each of the (B, T) positions, and produces a logit (score) for each potential output token (C)
         logits = self.lm_head(x) # (B, T, C = VOCAB_SIZE)
 
         if target_tokens is None:
@@ -203,40 +203,51 @@ if ON:
     # print(decode(m.generate(context, max_new_toks=500)[0].tolist()))
 
 
-# # ATTENTION
-# torch.manual_seed(1337)
-# B,T,C = 4,8,2
-# x = torch.randn(B,T,C)
-# x.shape
-
-
-# # VERY INEFFICIENT
-# # take mean of channels from 1 to t
-# xbow = torch.zeros((B,T,C))
-# for b in range(B):
-#     for t in range(T):
-#         xprev = x[b, :t+1] # (t,C)
-#         xbow[b,t] = torch.mean(xprev, 0)
-
-# #HENCE WHY WE USE MATRIX MULT
-# torch.manual_seed(42)
-# a = torch.ones(3,3)
-# b = torch.randint(0,10,(3,2)).float()
-# c = a @ b
+# ===== SELF-ATTENTION  =====
 
 torch.manual_seed(1337)
-B, T, C = 4,8,32
-x = torch.randn(B,T,C)
+B, T, C = 4,8,32 # C = N_EMBD
 
+x = torch.randn(B,T,C) # x is the embedding for each token (without context awareness)
+
+head_size = 16
+
+# the linear operation that will give the weights for each (B,T) across each "question"/"property" (C)
+key = nn.Linear(C, head_size, bias=False) # what I contain?
+query = nn.Linear(C, head_size, bias=False) # what I am searching for?
+value = nn.Linear(C, head_size, bias=False) # what I hand over?
+k = key(x) # (B, T, 16) 
+q = query(x) # (B, T, 16)
+
+# *** DOT PRODUCT OF QUERY AND KEY BECOMES THE WEIGHT ***
+# [1.0, 0.4,-0.9] dot every token's query with every token's key
+# [0.7, 0.3, 1.2] = affinity scores (how much each token in that row
+# [0.2, 0.6, 0.2] cares about each token in that column), future still included
+wei = q @ k.transpose(-2,-1) # (B, T, 16) @ (B, 16, T) -> (B, T, T)
+
+# [1, 0, 0] triangle matrix
+# [1, 1, 0]
+# [1, 1, 1] 
 tril = torch.tril(torch.ones(T,T))
-weight = torch.zeros((T,T))
-weight = weight.masked_fill(tril == 0, float('-inf'))
 
-# gives a triangle matrix of evenly dirstributed weights up to the final token before prediction
-weight = F.softmax(weight, dim=-1) 
+# [1, -inf, -inf] turn zeros to -inf using tril
+# [0.7, 0.3,-inf] this prevents any future token from being
+# [0.2, 0.6, 0.2] used to predict the next token after softmax
+wei = wei.masked_fill(tril == 0, float('-inf'))
 
-# For each token, and for each channel column, it takes a weighted sum down that column, and the weights are zero for any time step after the current one.
-out = weight @ x # embeddings for each token where the embedding weights are adjusted based on the previous tokens
+# [1.0, 0.0, 0.0] run softmax: e^z/sum(e^z)
+# [0.6, 0.4, 0.0] each row sums to 1, -infs become 0
+# [0.3, 0.4, 0.3] measueres how much each token listens to the prior ones
+wei = F.softmax(wei, dim=-1) 
+
+# what each token actually shares when another token attends to it
+v = value(x) # (B, T, 16)
+
+# *** OUTPUT IS A DESCRIPTION VECTOR (cols) FOR EACH CONTEXT-AWARE TOKEN (rows) ***
+# [1.0, 0.0, 0.0]   [1, 4]   [1.0, 4.0] the weighted sum of what the token saw
+# [0.6, 0.4, 0.0] @ [3, 0] = [1.8, 2.4] from previous tokens (v) * how much it cares (wei)
+# [0.3, 0.4, 0.3]   [5, 2]   [3.0, 1.8] 
+out = wei @ v # (B, T, T) @ (B, T, 16) -> (B, T, 16)
 
 print(out.shape)
 
