@@ -166,6 +166,7 @@ class MultiHeadAttention(nn.Module):
 
         # creates multiple Heads, each with their own K,Q,V weights
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(N_EMBD, N_EMBD)
 
     def forward(self, x):
         """
@@ -174,19 +175,27 @@ class MultiHeadAttention(nn.Module):
 
         x: (B, T, C) embeddings -> returns (B, T, num_heads * head_size)
         """
-
         # runs x through each head and joins them along the last dimension
-        return torch.cat([h(x) for h in self.heads], dim=-1) # (B, T, num_heads * head_size)
+        out = torch.cat([h(x) for h in self.heads], dim=-1) # (B, T, num_heads * head_size)
+
+        # projection back into the residual pathway
+        out = self.proj(out)
+        return out
 
 class FeedForward(nn.Module):
-    """ a simple linear layer followed by a non-linearity """
+    """ 
+    Self attention is where the tokens see how they interact with one another.
+    Feed forward is where each of these tokens then get tuned individually.
+    This implementation is a simple linear layer followed by a non-linearity. 
+    """
 
     def __init__(self, N_EMBD):
         super().__init__()
         self.net = nn.Sequential( # do a, then b
-            nn.Linear(N_EMBD, N_EMBD), # output = input_emb @ weights.T + bias
-                                       # weights begin random, then get learned in training (loss.backward())
+            nn.Linear(N_EMBD, 4 * N_EMBD), # output = input_emb @ weights.T + bias
+                                           # weights begin random, then get learned in training (loss.backward())
             nn.ReLU(), # turn negatives into zeros
+            nn.Linear(4 * N_EMBD, N_EMBD)  # projection layer going back into residual pathway
         )
 
     def forward(self, x):
@@ -196,6 +205,26 @@ class FeedForward(nn.Module):
         x: (B, T, C) -> (B, T, C)
         """
         return self.net(x)
+
+class Block(nn.Module):
+    """ Transformer block: communication followed by computation """
+
+    def __init__(self, N_EMBD, N_HEAD):
+        super().__init__()
+        head_size = N_EMBD // N_HEAD
+
+        # communication: run self-attention to get the raw vector numbers
+        self.sa = MultiHeadAttention(N_HEAD, head_size)
+
+        # computation: ffwd turns the vector numbers into something more useful for predicting the next token
+        self.ffwd = FeedForward(N_EMBD)
+
+    def forward(self, x):
+        # residual connections: fork off the main path then connect by addition
+        x = x + self.sa(x)
+        x = x + self.ffwd(x)
+        return x
+
 
 class BigramLanguageModel(nn.Module):
     """ A simple language model that predicts the next token from the current token. """
@@ -209,8 +238,12 @@ class BigramLanguageModel(nn.Module):
         # each token position (row) is mapped to an embedding (columns)
         self.position_embedding_table = nn.Embedding(BLOCK_SIZE, N_EMBD) # needed for attention
 
-        self.sa_heads = MultiHeadAttention(4, N_EMBD//4) # i.e. 4 heads of 8-dimensional attention = 32 (same as N_EMBD)
-        self.ffwd = FeedForward(N_EMBD)
+        # transformer layers
+        self.blocks = nn.Sequential(
+            Block(N_EMBD, N_HEAD=4),
+            Block(N_EMBD, N_HEAD=4),
+            Block(N_EMBD, N_HEAD=4)
+        )
 
         # initialises a weight for each embedding cell (columns) across each vocab token (row) + bias
         # it can then be used as a fn that runs: logits =  x @ weight.T + bias (one score per context-aware token)
@@ -227,11 +260,8 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(pos) # (T, C = N_EMBD)
         x = tok_emb + pos_emb # (B, T, C = N_EMBD) - pos_emb gets repeated B times before adding
 
-        # run self-attention to get the raw vector numbers
-        x = self.sa_heads(x) # (B, T, C)
-
-        # feed forward turns the vector numbers into something more useful for predicting the next token
-        x = self.ffwd # (B, T, C)
+        # run through transformer layers
+        x = self.blocks(x) # (B, T, C)
 
         # runs on each of the (B, T) positions, and produces a logit (score) for each potential output token (C)
         logits = self.lm_head(x) # (B, T, C = VOCAB_SIZE)
