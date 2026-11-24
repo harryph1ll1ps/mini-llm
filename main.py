@@ -31,7 +31,6 @@ with open('corpus.txt', 'r', encoding='utf-8') as f:
 chars = sorted(list(set(text)))
 VOCAB_SIZE = len(chars)
 
-
 # ===== TOKENISATION =====
 # NOTE: Opportunity to enhance. For now, we will just do a new token per char.
 
