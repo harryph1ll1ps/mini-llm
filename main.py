@@ -178,13 +178,30 @@ class MultiHeadAttention(nn.Module):
         # runs x through each head and joins them along the last dimension
         return torch.cat([h(x) for h in self.heads], dim=-1) # (B, T, num_heads * head_size)
 
+class FeedForward(nn.Module):
+    """ a simple linear layer followed by a non-linearity """
+
+    def __init__(self, N_EMBD):
+        super().__init__()
+        self.net = nn.Sequential( # do a, then b
+            nn.Linear(N_EMBD, N_EMBD), # output = input_emb @ weights.T + bias
+                                       # weights begin random, then get learned in training (loss.backward())
+            nn.ReLU(), # turn negatives into zeros
+        )
+
+    def forward(self, x):
+        """
+        for each token vector independently: blend its numbers into new features (Linear),
+        then zero out the negative ones (ReLU)
+        x: (B, T, C) -> (B, T, C)
+        """
+        return self.net(x)
+
 class BigramLanguageModel(nn.Module):
     """ A simple language model that predicts the next token from the current token. """
 
     def __init__(self):
         super().__init__()
-
-        # build 3 lookup tables and fill with random numbers
 
         # each token value (row) is mapped to an embedding (columns)
         self.token_embedding_table = nn.Embedding(VOCAB_SIZE, N_EMBD)
@@ -192,8 +209,8 @@ class BigramLanguageModel(nn.Module):
         # each token position (row) is mapped to an embedding (columns)
         self.position_embedding_table = nn.Embedding(BLOCK_SIZE, N_EMBD) # needed for attention
 
-        # initialise Head (self-attention)
         self.sa_heads = MultiHeadAttention(4, N_EMBD//4) # i.e. 4 heads of 8-dimensional attention = 32 (same as N_EMBD)
+        self.ffwd = FeedForward(N_EMBD)
 
         # initialises a weight for each embedding cell (columns) across each vocab token (row) + bias
         # it can then be used as a fn that runs: logits =  x @ weight.T + bias (one score per context-aware token)
@@ -210,8 +227,11 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(pos) # (T, C = N_EMBD)
         x = tok_emb + pos_emb # (B, T, C = N_EMBD) - pos_emb gets repeated B times before adding
 
-        # apply one head of self-attention
+        # run self-attention to get the raw vector numbers
         x = self.sa_heads(x) # (B, T, C)
+
+        # feed forward turns the vector numbers into something more useful for predicting the next token
+        x = self.ffwd # (B, T, C)
 
         # runs on each of the (B, T) positions, and produces a logit (score) for each potential output token (C)
         logits = self.lm_head(x) # (B, T, C = VOCAB_SIZE)
@@ -298,55 +318,3 @@ if ON:
 context = torch.zeros((1, 1), dtype=torch.long, device=DEVICE)
 generated = m.generate(context, max_new_toks=100)
 print(decode(generated[0].tolist()))
-
-
-
-# torch.manual_seed(1337)
-# B, T, C = 4,8,32 # C = N_EMBD
-
-# x = torch.randn(B,T,C) # x is the embedding for each token (without context awareness)
-
-# head_size = 16
-
-# # the linear operation that will give the weights for each (B,T) across each "question"/"property" (C)
-# key = nn.Linear(C, head_size, bias=False) # what I contain?
-# query = nn.Linear(C, head_size, bias=False) # what I am searching for?
-# value = nn.Linear(C, head_size, bias=False) # what I hand over?
-# k = key(x) # (B, T, 16) 
-# q = query(x) # (B, T, 16)
-
-# # *** DOT PRODUCT OF QUERY AND KEY BECOMES THE WEIGHT ***
-# # [1.0, 0.4,-0.9] dot every token's query with every token's key
-# # [0.7, 0.3, 1.2] = affinity scores (how much each token in that row
-# # [0.2, 0.6, 0.2] cares about each token in that column), future still included
-# wei = q @ k.transpose(-2,-1) # (B, T, 16) @ (B, 16, T) -> (B, T, T)
-
-# # [1, 0, 0] triangle matrix
-# # [1, 1, 0]
-# # [1, 1, 1] 
-# tril = torch.tril(torch.ones(T,T))
-
-# # [1, -inf, -inf] turn zeros to -inf using tril
-# # [0.7, 0.3,-inf] this prevents any future token from being
-# # [0.2, 0.6, 0.2] used to predict the next token after softmax
-# wei = wei.masked_fill(tril == 0, float('-inf'))
-
-# # [1.0, 0.0, 0.0] run softmax: e^z/sum(e^z)
-# # [0.6, 0.4, 0.0] each row sums to 1, -infs become 0
-# # [0.3, 0.4, 0.3] measueres how much each token listens to the prior ones
-# wei = F.softmax(wei, dim=-1) 
-
-# # what each token actually shares when another token attends to it
-# v = value(x) # (B, T, 16)
-
-# # *** OUTPUT IS A DESCRIPTION VECTOR (cols) FOR EACH CONTEXT-AWARE TOKEN (rows) ***
-# # [1.0, 0.0, 0.0]   [1, 4]   [1.0, 4.0] the weighted sum of what the token saw
-# # [0.6, 0.4, 0.0] @ [3, 0] = [1.8, 2.4] from previous tokens (v) * how much it cares (wei)
-# # [0.3, 0.4, 0.3]   [5, 2]   [3.0, 1.8] 
-# out = wei @ v # (B, T, T) @ (B, T, 16) -> (B, T, 16)
-
-# print(out.shape)
-
-# # SOFTMAX(z) = (e^z)/sum(e^z)
-
-# # for attention, the dot product of the query and the key will become weight
