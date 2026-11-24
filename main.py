@@ -59,11 +59,11 @@ def get_batch(split: Literal["train", "test"]):
     """ get numerous sequences of tokens (x) and the corresponding n+1 target tokens (y) """
     # generate a batch of data of inputs x and targets y
     data = train_data if split == "train" else test_data
-    ix = torch.randint(len(data) - BLOCK_SIZE, (BATCH_SIZE, )) # generates BATCH_SIZE random starting positions
-    x = torch.stack([data[i:i+BLOCK_SIZE] for i in ix]) # get the block of tokens to predict from, for each starting point (matrix)
-    y = torch.stack([data[i+1:i+BLOCK_SIZE+1] for i in ix]) # shift by 1, since n tokens should predict the n+1 token (matrix)
+    ix = torch.randint(len(data) - BLOCK_SIZE, (BATCH_SIZE, )) # generates B random starting positions with T space available
+    x = torch.stack([data[i:i+BLOCK_SIZE] for i in ix]) # get the T tokens to predict from, for the starting point of each B (B,T)
+    y = torch.stack([data[i+1:i+BLOCK_SIZE+1] for i in ix]) # shift by 1, since n tokens should predict the n+1 token (B,T)
     x,y = x.to(DEVICE), y.to(DEVICE) # move the tensors onto our computation device
-    return x, y
+    return x, y 
 
 
 @torch.no_grad() # when running this fn, don't calculate gradients
@@ -99,20 +99,28 @@ class Head(nn.Module):
         super().__init__()
 
         # the linear operations that will give the weights for each (B,T) across each "question"/"property" (C)
-        self.key = nn.Linear(N_EMBD, head_size, bias=False) # what I contain?
+        self.key = nn.Linear(N_EMBD, head_size, bias=False) # what I contain? - i.e. embd1: [0.5, 0.7, 0.8,..., 0.9] 
         self.query = nn.Linear(N_EMBD, head_size, bias=False) # what I am searching for?
         self.value = nn.Linear(N_EMBD, head_size, bias=False) # what I hand over?
-        self.register_buffer('tril', torch.tril(torch.ones(BLOCK_SIZE, BLOCK_SIZE)))
+
+        self.register_buffer('tril', torch.tril(torch.ones(BLOCK_SIZE, BLOCK_SIZE))) # makes the lower triangular matrix
 
     def forward(self, x):
+        """
+        Causal self-attention: each token takes a weighted mix of the value
+        vectors of itself and earlier tokens, with weights from query·key scores.
+
+        x: (B, T, C) embeddings -> returns (B, T, head_size)
+        """
         B, T, C = x.shape
-        k = self.key(x) # (B, T, C) 
-        q = self.query(x) # (B, T, C)
+        k = self.key(x) # (B, T, C = head_size) 
+        q = self.query(x) # (B, T, C = head_size)
 
         # *** DOT PRODUCT OF QUERY AND KEY BECOMES THE WEIGHT ***
         # [1.0, 0.4,-0.9] dot every token's query with every token's key
-        # [0.7, 0.3, 1.2] = affinity scores (how much each token in that row
-        # [0.2, 0.6, 0.2] cares about each token in that column), future still included
+        # [0.7, 0.3, 1.2] = affinity scores (how much each token in that row cares
+        # [0.2, 0.6, 0.2] about each token in that column [same batch]), future still included
+        # divide by sqrt(k) to ensure weights are appropriately diffuse (see attention formula)
         wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 # (B, T, C) @ (B, C, T) -> (B, T, T)
 
         # TRIANGLE (tril)
@@ -131,7 +139,7 @@ class Head(nn.Module):
         wei = F.softmax(wei, dim=-1) # (B, T, T)
 
         # what each token actually shares when another token attends to it
-        v = self.value(x) # (B, T, C)
+        v = self.value(x) # (B, T, C = head_size)
 
         # *** OUTPUT IS A DESCRIPTION VECTOR (cols) FOR EACH CONTEXT-AWARE TOKEN (rows) ***
         # [1.0, 0.0, 0.0]   [1, 4]   [1.0, 4.0] the weighted sum of what the token saw
@@ -146,6 +154,29 @@ class Head(nn.Module):
 # ===== TRANSFORMER  =====
 # NOTE: Opportunity to enhance. For now, we will use bigram language model.
 
+class MultiHeadAttention(nn.Module):
+    """ 
+    Multiple heads of self-attention in parallel. 
+    Each head can learn to look for something different. 
+    Results are concatenated for greater info.
+    """
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+
+        # creates multiple Heads, each with their own K,Q,V weights
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+
+    def forward(self, x):
+        """
+        Create multiple self-attention Heads where each token takes a weighted mix 
+        of the value vectors of itself and earlier tokens, with weights from query·key scores.
+
+        x: (B, T, C) embeddings -> returns (B, T, num_heads * head_size)
+        """
+
+        # runs x through each head and joins them along the last dimension
+        return torch.cat([h(x) for h in self.heads], dim=-1) # (B, T, num_heads * head_size)
 
 class BigramLanguageModel(nn.Module):
     """ A simple language model that predicts the next token from the current token. """
@@ -161,12 +192,12 @@ class BigramLanguageModel(nn.Module):
         # each token position (row) is mapped to an embedding (columns)
         self.position_embedding_table = nn.Embedding(BLOCK_SIZE, N_EMBD) # needed for attention
 
-        # initialise Head
-        self.sa_head = Head(N_EMBD)
+        # initialise Head (self-attention)
+        self.sa_heads = MultiHeadAttention(4, N_EMBD//4) # i.e. 4 heads of 8-dimensional attention = 32 (same as N_EMBD)
 
         # initialises a weight for each embedding cell (columns) across each vocab token (row) + bias
-        # it can then be used as a fn that runs: logits =  x @ weightght.T + bias
-        self.lm_head = nn.Linear(N_EMBD, VOCAB_SIZE) # the final layer (head) of the lm (language model) that produces the predictions
+        # it can then be used as a fn that runs: logits =  x @ weight.T + bias (one score per context-aware token)
+        self.lm_head = nn.Linear(N_EMBD, VOCAB_SIZE) # the final layer (head) of the lm (language model) that produces the next predictions
 
 
     def forward(self, tok_sequence: torch.Tensor, target_tokens: torch.Tensor=None) -> torch.Tensor:
@@ -180,7 +211,7 @@ class BigramLanguageModel(nn.Module):
         x = tok_emb + pos_emb # (B, T, C = N_EMBD) - pos_emb gets repeated B times before adding
 
         # apply one head of self-attention
-        x = self.sa_head(x) # (B, T, C)
+        x = self.sa_heads(x) # (B, T, C)
 
         # runs on each of the (B, T) positions, and produces a logit (score) for each potential output token (C)
         logits = self.lm_head(x) # (B, T, C = VOCAB_SIZE)
@@ -203,14 +234,14 @@ class BigramLanguageModel(nn.Module):
         Given some tokens, repeatedly predict the next token, add it to the sequence, and repeat.
         This is inference/generation, not training. The weightghts are already trained.
         """
-        # tok_sequence is (B, T) array of indices in the current context
+        # tok_sequence is (B, T) array of indices
         for _ in range(max_new_toks): # (1) the _ (2) the cat _ (3) the cat sat _ (4) the cat sat on _ ...
 
-            # crop tok_sequence to ensure it does not exceed BLOCK_SIZE
+            # crop the tok_sequence to ensure it does not exceed BLOCK_SIZE (so that emb tbl does not overflow)
             tok_sequence_cond = tok_sequence[:, -BLOCK_SIZE:]
 
             # calling self runs self.__call__() which does some processing, then calls forward()
-            logits, _ = self(tok_sequence_cond) 
+            logits, _ = self(tok_sequence_cond) # (B, T, C)
 
             # focus only on the last time step (we only care about predicting the next token)
             # NOTE: for a bigram model, it is silly that we pass in the full history when it only needs the nth token
@@ -235,7 +266,7 @@ m = model.to(DEVICE)
 # ===== TRAINING  =====
 
 # create a PyTorch optimizer
-optimizer = torch.optim.AdamW(m.parameters(), lr=LEARNING_RATE) # params are the embedding table weightghts (vocab size, vocab size)
+optimizer = torch.optim.AdamW(m.parameters(), lr=LEARNING_RATE) # params are the embedding table weights (vocab size, vocab size)
 
 ON = True
 
@@ -256,7 +287,7 @@ if ON:
         # erases the gradients from the previous training step
         optimizer.zero_grad(set_to_none=True)
 
-        # calculating this steps gradients (how much should each weightght move to reduce the loss)
+        # calculating this step's gradients (how much should each weight move to reduce the loss)
         loss.backward()
 
         # actually change all of the weightghts
