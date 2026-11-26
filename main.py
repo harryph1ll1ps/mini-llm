@@ -7,18 +7,17 @@ torch.manual_seed(1)
 
 # ===== HYPERPARAMETERS =====
 
-BATCH_SIZE = 32 # how many independent sequences will we process in parallel?
-BLOCK_SIZE = 8 # what is the max number of tokens we can use as input for a prediction?
-               # NOTE: in a block size of n tokens, we will iterate our prediction on n-1 tokens
+BATCH_SIZE = 32
+BLOCK_SIZE = 64
 TRAINING_DATA_PROPORTION = 0.9
-MAX_ITERS = 5000
+MAX_ITERS = 3000
 EVAL_INTERVAL = 500
-LEARNING_RATE = 3e-4
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu" # run on gpu if available
-EVAL_ITERS = 200
-N_EMBD = 384 # embedding size/dimensions
-N_HEAD = 6
-N_LAYER = 6
+LEARNING_RATE = 1e-3   # small models tolerate a higher LR
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+EVAL_ITERS = 50
+N_EMBD = 128
+N_HEAD = 4
+N_LAYER = 4
 DROPOUT = 0.2
 
 
@@ -104,6 +103,8 @@ class Head(nn.Module):
 
         self.register_buffer('tril', torch.tril(torch.ones(BLOCK_SIZE, BLOCK_SIZE))) # makes the lower triangular matrix
 
+        self.dropout = nn.Dropout(DROPOUT)
+
     def forward(self, x):
         """
         Causal self-attention: each token takes a weighted mix of the value
@@ -138,6 +139,10 @@ class Head(nn.Module):
         # [0.3, 0.4, 0.3] measueres how much each token listens to the prior ones
         wei = F.softmax(wei, dim=-1) # (B, T, T)
 
+        # dropout randomly masks some weights so that the neural net learns sublayers that aggregate in final product
+        # see the dropout paper (helps w scale and overfitting)
+        wei = self.dropout(wei)
+
         # what each token actually shares when another token attends to it
         v = self.value(x) # (B, T, C = head_size)
 
@@ -169,6 +174,7 @@ class MultiHeadAttention(nn.Module):
         # creates multiple Heads, each with their own K,Q,V weights
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(N_EMBD, N_EMBD)
+        self.dropout = nn.Dropout(DROPOUT)
 
     def forward(self, x):
         """
@@ -183,6 +189,9 @@ class MultiHeadAttention(nn.Module):
 
         # projection back into the residual pathway (merges the concat head_size weights into something meaningful)
         out = self.proj(out) # (B, T, C = N_EMBD)
+
+        out = self.dropout(out)
+
         return out
 
 class FeedForward(nn.Module):
@@ -196,13 +205,16 @@ class FeedForward(nn.Module):
         super().__init__()
         self.net = nn.Sequential( # do a, then b
             
-            # expand token vector (B, T, C = 4 * N_EMBD)
+            # 4 is what is used in "Attention is all you need"
+            # expand token vector on residual path (B, T, C = 4 * N_EMBD)
             nn.Linear(N_EMBD, 4 * N_EMBD), # output = input_emb @ weights.T + bias 
                                            # weights begin random, then get learned in training (loss.backward())
             nn.ReLU(), # turn negatives into zeros
 
             # projection layer going back into residual pathway (B, T, C = N_EMBD)
-            nn.Linear(4 * N_EMBD, N_EMBD)  
+            nn.Linear(4 * N_EMBD, N_EMBD),
+
+            nn.Dropout(DROPOUT),
         )
 
     def forward(self, x):
@@ -228,10 +240,15 @@ class Block(nn.Module):
         # computation: ffwd turns the vector numbers into something more useful for predicting the next token
         self.ffwd = FeedForward(N_EMBD)
 
+        # LayerNorm resets each token’s vector to a consistent scale (mean = 0, stdev = 1) 
+        # before it enters attention or the feed-forward.
+        self.ln1 = nn.LayerNorm(N_EMBD)
+        self.ln2 = nn.LayerNorm(N_EMBD)
+
     def forward(self, x):
         # residual connections: fork off the main path then connect by addition
-        x = x + self.sa(x)
-        x = x + self.ffwd(x)
+        x = x + self.sa(self.ln1(x)) # layer norm (normalisation)
+        x = x + self.ffwd(self.ln2(x))
         return x
 
 
@@ -248,11 +265,10 @@ class BigramLanguageModel(nn.Module):
         self.position_embedding_table = nn.Embedding(BLOCK_SIZE, N_EMBD) # needed for attention
 
         # transformer layers
-        self.blocks = nn.Sequential(
-            Block(N_EMBD, N_HEAD=4),
-            Block(N_EMBD, N_HEAD=4),
-            Block(N_EMBD, N_HEAD=4)
-        )
+        self.blocks = nn.Sequential(*[Block(N_EMBD, N_HEAD=N_HEAD) for _ in range(N_LAYER)])
+        
+        # final layer norm
+        self.ln_f = nn.LayerNorm(N_EMBD)
 
         # the final layer (head) of the lm that converts the context-aware token vector into a score for every vocab
         # initialises a weight for each embedding cell (columns) across each possible vocab token (row) + bias
