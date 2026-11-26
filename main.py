@@ -35,7 +35,7 @@ VOCAB_SIZE = len(chars)
 # NOTE: Opportunity to enhance. For now, we will just do a new token per char.
 
 # map each character to an integer (token identifier)
-char_to_int = { ch:i for i,ch in enumerate(chars) } 
+char_to_int = { ch:i for i,ch in enumerate(chars) }  
 int_to_char = { i:ch for i,ch in enumerate (chars) }
 
 def encode(s: str) -> list[int]:
@@ -97,7 +97,7 @@ class Head(nn.Module):
     def __init__(self, head_size):
         super().__init__()
 
-        # the linear operations that will give the weights for each (B,T) across each "question"/"property" (C)
+        # the linear operations that will give the weights for each (B,T) across each "question"/"property" (C = head_size)
         self.key = nn.Linear(N_EMBD, head_size, bias=False) # what I contain? - i.e. embd1: [0.5, 0.7, 0.8,..., 0.9] 
         self.query = nn.Linear(N_EMBD, head_size, bias=False) # what I am searching for?
         self.value = nn.Linear(N_EMBD, head_size, bias=False) # what I hand over?
@@ -109,10 +109,11 @@ class Head(nn.Module):
         Causal self-attention: each token takes a weighted mix of the value
         vectors of itself and earlier tokens, with weights from query·key scores.
 
-        x: (B, T, C) embeddings -> returns (B, T, head_size)
+        x: (B, T, C = N_EMBD) embeddings -> returns (B, T, head_size)
         """
         B, T, C = x.shape
         k = self.key(x) # (B, T, C = head_size) 
+                        # NOTE: C gets transformed from N_EMBD to head_size
         q = self.query(x) # (B, T, C = head_size)
 
         # *** DOT PRODUCT OF QUERY AND KEY BECOMES THE WEIGHT ***
@@ -140,7 +141,7 @@ class Head(nn.Module):
         # what each token actually shares when another token attends to it
         v = self.value(x) # (B, T, C = head_size)
 
-        # *** OUTPUT IS A DESCRIPTION VECTOR (cols) FOR EACH CONTEXT-AWARE TOKEN (rows) ***
+        # *** OUTPUT IS THE NEW CONTEXT-AWARE VECTOR (cols) FOR EACH TOKEN (rows) ***
         # [1.0, 0.0, 0.0]   [1, 4]   [1.0, 4.0] the weighted sum of what the token saw
         # [0.6, 0.4, 0.0] @ [3, 0] = [1.8, 2.4] from previous tokens (v) * how much it cares (wei)
         # [0.3, 0.4, 0.3]   [5, 2]   [3.0, 1.8] 
@@ -155,7 +156,9 @@ class Head(nn.Module):
 
 class MultiHeadAttention(nn.Module):
     """ 
-    Multiple heads of self-attention in parallel. 
+    A head is 1 self-attention unit. 
+    It has its own 3 linear layers (K, Q, V) & computes its own attention pattern.
+    This uses multiple heads of self-attention in parallel. 
     Each head can learn to look for something different. 
     Results are concatenated for greater info.
     """
@@ -174,11 +177,12 @@ class MultiHeadAttention(nn.Module):
 
         x: (B, T, C) embeddings -> returns (B, T, num_heads * head_size)
         """
-        # runs x through each head and joins them along the last dimension
-        out = torch.cat([h(x) for h in self.heads], dim=-1) # (B, T, num_heads * head_size)
+        # runs x through each head (B, T, C = head_size) and joins them along the last dimension (C)
+        out = torch.cat([h(x) for h in self.heads], dim=-1) # (B, T, C = num_heads * head_size = N_EMBD)
 
-        # projection back into the residual pathway
-        out = self.proj(out)
+
+        # projection back into the residual pathway (merges the concat head_size weights into something meaningful)
+        out = self.proj(out) # (B, T, C = N_EMBD)
         return out
 
 class FeedForward(nn.Module):
@@ -191,10 +195,14 @@ class FeedForward(nn.Module):
     def __init__(self, N_EMBD):
         super().__init__()
         self.net = nn.Sequential( # do a, then b
-            nn.Linear(N_EMBD, 4 * N_EMBD), # output = input_emb @ weights.T + bias
+            
+            # expand token vector (B, T, C = 4 * N_EMBD)
+            nn.Linear(N_EMBD, 4 * N_EMBD), # output = input_emb @ weights.T + bias 
                                            # weights begin random, then get learned in training (loss.backward())
             nn.ReLU(), # turn negatives into zeros
-            nn.Linear(4 * N_EMBD, N_EMBD)  # projection layer going back into residual pathway
+
+            # projection layer going back into residual pathway (B, T, C = N_EMBD)
+            nn.Linear(4 * N_EMBD, N_EMBD)  
         )
 
     def forward(self, x):
@@ -210,7 +218,9 @@ class Block(nn.Module):
 
     def __init__(self, N_EMBD, N_HEAD):
         super().__init__()
-        head_size = N_EMBD // N_HEAD
+
+        # inside a head, each token’s vector is compressed to from N_EMBD to head_size
+        head_size = N_EMBD // N_HEAD # used to split the embedding dimensions evenly across N_HEAD
 
         # communication: run self-attention to get the raw vector numbers
         self.sa = MultiHeadAttention(N_HEAD, head_size)
@@ -244,9 +254,11 @@ class BigramLanguageModel(nn.Module):
             Block(N_EMBD, N_HEAD=4)
         )
 
-        # initialises a weight for each embedding cell (columns) across each vocab token (row) + bias
+        # the final layer (head) of the lm that converts the context-aware token vector into a score for every vocab
+        # initialises a weight for each embedding cell (columns) across each possible vocab token (row) + bias
         # it can then be used as a fn that runs: logits =  x @ weight.T + bias (one score per context-aware token)
-        self.lm_head = nn.Linear(N_EMBD, VOCAB_SIZE) # the final layer (head) of the lm (language model) that produces the next predictions
+                                                         # x is (B, T, N), the output of the transformer blocks
+        self.lm_head = nn.Linear(N_EMBD, VOCAB_SIZE) # (B, T, VOCAB_SIZE)
 
 
     def forward(self, tok_sequence: torch.Tensor, target_tokens: torch.Tensor=None) -> torch.Tensor:
@@ -254,17 +266,19 @@ class BigramLanguageModel(nn.Module):
 
         B, T = tok_sequence.shape
 
+        # turn each tok in the sequence into a position aware vector
         tok_emb = self.token_embedding_table(tok_sequence) # outputs a 3D tensor (B, T, C = N_EMBD)
         pos = torch.arange(T, device=DEVICE) # i.e. torch.arange(3) = tensor([0, 1, 2])
         pos_emb = self.position_embedding_table(pos) # (T, C = N_EMBD)
         x = tok_emb + pos_emb # (B, T, C = N_EMBD) - pos_emb gets repeated B times before adding
 
-        # run through transformer layers
+        # run through transformer layers so each token vector becomes context-aware
         x = self.blocks(x) # (B, T, C)
 
         # runs on each of the (B, T) positions, and produces a logit (score) for each potential output token (C)
         logits = self.lm_head(x) # (B, T, C = VOCAB_SIZE)
 
+        # calculate the loss based on the logits scores compared to the target tokens
         if target_tokens is None:
             loss = None
         else:
