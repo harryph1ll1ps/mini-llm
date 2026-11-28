@@ -1,3 +1,5 @@
+from __future__ import annotations # lets the "X | None" type hints work on Python < 3.10
+
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -289,6 +291,21 @@ class TransformerLanguageModel(nn.Module):
                                                          # x is (B, T, N), the output of the transformer blocks
         self.lm_head = nn.Linear(N_EMBD, VOCAB_SIZE) # (B, T, VOCAB_SIZE)
 
+        # run _init_weights on every submodule (self.apply walks the whole module tree)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module: nn.Module) -> None:
+        """
+        Start every weight as small random numbers (normal, mean = 0, stdev = 0.02) and every bias at 0.
+        PyTorch's default init is larger, so starting small keeps early logits close to uniform
+        and makes training start from a lower, more stable loss.
+        """
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(
         self, tok_sequence: torch.Tensor, target_tokens: torch.Tensor | None = None
@@ -356,6 +373,9 @@ class TransformerLanguageModel(nn.Module):
             
 
 model = TransformerLanguageModel().to(DEVICE)
+
+# print the number of learnable parameters (numel = number of elements in each weight tensor)
+print(sum(p.numel() for p in model.parameters()) / 1e6, "M parameters")
 
 # ===========================
 # ===== TRAINING  ===========
