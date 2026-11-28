@@ -5,7 +5,11 @@ from typing import Literal
 
 torch.manual_seed(1)
 
+# ===========================
 # ===== HYPERPARAMETERS =====
+# ===========================
+
+# careful, larger scale needs a GPU so that mac CPU doesnt get cooked
 
 BATCH_SIZE = 32
 BLOCK_SIZE = 64
@@ -20,8 +24,10 @@ N_HEAD = 4
 N_LAYER = 4
 DROPOUT = 0.2
 
-
+# ============================
 # ===== CORPUS RETRIEVAL =====
+# ============================
+
 # get the text corpus
 with open('corpus.txt', 'r', encoding='utf-8') as f:
     text = f.read()
@@ -30,7 +36,10 @@ with open('corpus.txt', 'r', encoding='utf-8') as f:
 chars = sorted(list(set(text)))
 VOCAB_SIZE = len(chars)
 
-# ===== TOKENISATION =====
+# ===========================
+# ===== TOKENISATION ========
+# ===========================
+
 # NOTE: Opportunity to enhance. For now, we will just do a new token per char.
 
 # map each character to an integer (token identifier)
@@ -87,8 +96,9 @@ def estimate_loss():
     model.train() # set the model back to train mode
     return out
 
-
+# ===========================
 # ===== SELF-ATTENTION  =====
+# ===========================
 
 class Head(nn.Module):
     " one head of self-attention "
@@ -155,8 +165,10 @@ class Head(nn.Module):
         return out
 
 
+# ===========================
+# ===== TRANSFORMER  ========
+# ===========================
 
-# ===== TRANSFORMER  =====
 # NOTE: Opportunity to enhance. For now, we will use bigram language model.
 
 class MultiHeadAttention(nn.Module):
@@ -342,7 +354,9 @@ class BigramLanguageModel(nn.Module):
 model = BigramLanguageModel()
 m = model.to(DEVICE)
 
-# ===== TRAINING  =====
+# ===========================
+# ===== TRAINING  ===========
+# ===========================
 
 # create a PyTorch optimizer
 optimizer = torch.optim.AdamW(m.parameters(), lr=LEARNING_RATE) # params are the embedding table weights (vocab size, vocab size)
@@ -375,5 +389,5 @@ if ON:
 
 # Print: starting from a single token (ID 0) and generate 100 new tokens
 context = torch.zeros((1, 1), dtype=torch.long, device=DEVICE)
-generated = m.generate(context, max_new_toks=100)
+generated = m.generate(context, max_new_toks=500)
 print(decode(generated[0].tolist()))
