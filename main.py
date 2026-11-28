@@ -62,7 +62,7 @@ train_data = encoded_corpus[:n]
 test_data = encoded_corpus[n:]
 
 
-def get_batch(split: Literal["train", "test"]):
+def get_batch(split: Literal["train", "test"]) -> tuple[torch.Tensor, torch.Tensor]:
     """ get numerous sequences of tokens (x) and the corresponding n+1 target tokens (y) """
     # generate a batch of data of inputs x and targets y
     data = train_data if split == "train" else test_data
@@ -74,14 +74,14 @@ def get_batch(split: Literal["train", "test"]):
 
 
 @torch.no_grad() # when running this fn, don't calculate gradients
-def estimate_loss():
+def estimate_loss() -> dict[str, torch.Tensor]:
     """ 
     take a number of random batches and avg their losses
 
     returns: out = { "train": 1.52, "test": 1.68 }
     """
     out = {}    
-    model.eval() # put the model in eval mode (some NN's behave differently)
+    model.eval() # put the model in eval mode (some NN's behave differently - here it turns dropout off)
     
     for split in ["train", "test"]:
         losses = torch.zeros(EVAL_ITERS) # [0, 0, 0, 0, 0, ..., 0]
@@ -103,7 +103,7 @@ def estimate_loss():
 class Head(nn.Module):
     " one head of self-attention "
 
-    def __init__(self, head_size):
+    def __init__(self, head_size: int) -> None:
         super().__init__()
 
         # the linear operations that will give the weights for each (B,T) across each "question"/"property" (C = head_size)
@@ -115,7 +115,7 @@ class Head(nn.Module):
 
         self.dropout = nn.Dropout(DROPOUT)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Causal self-attention: each token takes a weighted mix of the value
         vectors of itself and earlier tokens, with weights from query·key scores.
@@ -131,7 +131,7 @@ class Head(nn.Module):
         # [1.0, 0.4,-0.9] dot every token's query with every token's key
         # [0.7, 0.3, 1.2] = affinity scores (how much each token in that row cares
         # [0.2, 0.6, 0.2] about each token in that column [same batch]), future still included
-        # divide by sqrt(k) to ensure weights are appropriately diffuse (see attention formula)
+        # divide by sqrt(head_size) to ensure weights are appropriately diffuse (see attention formula)
         wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 # (B, T, C) @ (B, C, T) -> (B, T, T)
 
         # TRIANGLE (tril)
@@ -146,7 +146,7 @@ class Head(nn.Module):
 
         # [1.0, 0.0, 0.0] run softmax: e^z/sum(e^z)
         # [0.6, 0.4, 0.0] each row sums to 1, -infs become 0
-        # [0.3, 0.4, 0.3] measueres how much each token listens to the prior ones
+        # [0.3, 0.4, 0.3] measures how much each token listens to the prior ones
         wei = F.softmax(wei, dim=-1) # (B, T, T)
 
         # dropout randomly masks some weights so that the neural net learns sublayers that aggregate in final product
@@ -169,7 +169,7 @@ class Head(nn.Module):
 # ===== TRANSFORMER  ========
 # ===========================
 
-# NOTE: Opportunity to enhance. For now, we will use bigram language model.
+# NOTE: Opportunity to enhance. For now, we will use a small character-level transformer.
 
 class MultiHeadAttention(nn.Module):
     """ 
@@ -180,7 +180,7 @@ class MultiHeadAttention(nn.Module):
     Results are concatenated for greater info.
     """
 
-    def __init__(self, num_heads, head_size):
+    def __init__(self, num_heads: int, head_size: int) -> None:
         super().__init__()
 
         # creates multiple Heads, each with their own K,Q,V weights
@@ -188,12 +188,13 @@ class MultiHeadAttention(nn.Module):
         self.proj = nn.Linear(N_EMBD, N_EMBD)
         self.dropout = nn.Dropout(DROPOUT)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Create multiple self-attention Heads where each token takes a weighted mix 
+        Run all self-attention Heads in parallel, where each token takes a weighted mix
         of the value vectors of itself and earlier tokens, with weights from query·key scores.
+        Then concatenate the heads and project back to N_EMBD.
 
-        x: (B, T, C) embeddings -> returns (B, T, num_heads * head_size)
+        x: (B, T, C = N_EMBD) embeddings -> returns (B, T, N_EMBD)
         """
         # runs x through each head (B, T, C = head_size) and joins them along the last dimension (C)
         out = torch.cat([h(x) for h in self.heads], dim=-1) # (B, T, C = num_heads * head_size = N_EMBD)
@@ -210,29 +211,29 @@ class FeedForward(nn.Module):
     """ 
     Self attention is where the tokens see how they interact with one another.
     Feed forward is where each of these tokens then get tuned individually.
-    This implementation is a simple linear layer followed by a non-linearity. 
+    This implementation is a linear layer (expand x4), a non-linearity, then a linear layer (project back).
     """
 
-    def __init__(self, N_EMBD):
+    def __init__(self, n_embd: int) -> None:
         super().__init__()
         self.net = nn.Sequential( # do a, then b
             
             # 4 is what is used in "Attention is all you need"
-            # expand token vector on residual path (B, T, C = 4 * N_EMBD)
-            nn.Linear(N_EMBD, 4 * N_EMBD), # output = input_emb @ weights.T + bias 
+            # expand token vector into a wider hidden space, off the residual path (B, T, C = 4 * N_EMBD)
+            nn.Linear(n_embd, 4 * n_embd), # output = input_emb @ weights.T + bias 
                                            # weights begin random, then get learned in training (loss.backward())
             nn.ReLU(), # turn negatives into zeros
 
             # projection layer going back into residual pathway (B, T, C = N_EMBD)
-            nn.Linear(4 * N_EMBD, N_EMBD),
+            nn.Linear(4 * n_embd, n_embd),
 
             nn.Dropout(DROPOUT),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         for each token vector independently: blend its numbers into new features (Linear),
-        then zero out the negative ones (ReLU)
+        then zero out the negative ones (ReLU), then project back down (Linear)
         x: (B, T, C) -> (B, T, C)
         """
         return self.net(x)
@@ -240,34 +241,34 @@ class FeedForward(nn.Module):
 class Block(nn.Module):
     """ Transformer block: communication followed by computation """
 
-    def __init__(self, N_EMBD, N_HEAD):
+    def __init__(self, n_embd: int, n_head: int) -> None:
         super().__init__()
 
-        # inside a head, each token’s vector is compressed to from N_EMBD to head_size
-        head_size = N_EMBD // N_HEAD # used to split the embedding dimensions evenly across N_HEAD
+        # inside a head, each token’s vector is compressed from N_EMBD to head_size
+        head_size = n_embd // n_head # used to split the embedding dimensions evenly across N_HEAD
 
         # communication: run self-attention to get the raw vector numbers
-        self.sa = MultiHeadAttention(N_HEAD, head_size)
+        self.sa = MultiHeadAttention(n_head, head_size)
 
         # computation: ffwd turns the vector numbers into something more useful for predicting the next token
-        self.ffwd = FeedForward(N_EMBD)
+        self.ffwd = FeedForward(n_embd)
 
         # LayerNorm resets each token’s vector to a consistent scale (mean = 0, stdev = 1) 
         # before it enters attention or the feed-forward.
-        self.ln1 = nn.LayerNorm(N_EMBD)
-        self.ln2 = nn.LayerNorm(N_EMBD)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # residual connections: fork off the main path then connect by addition
         x = x + self.sa(self.ln1(x)) # layer norm (normalisation)
         x = x + self.ffwd(self.ln2(x))
         return x
 
 
-class BigramLanguageModel(nn.Module):
-    """ A simple language model that predicts the next token from the current token. """
+class TransformerLanguageModel(nn.Module):
+    """ A simple language model that predicts the next token from up to BLOCK_SIZE previous tokens. """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
 
         # each token value (row) is mapped to an embedding (columns)
@@ -277,19 +278,21 @@ class BigramLanguageModel(nn.Module):
         self.position_embedding_table = nn.Embedding(BLOCK_SIZE, N_EMBD) # needed for attention
 
         # transformer layers
-        self.blocks = nn.Sequential(*[Block(N_EMBD, N_HEAD=N_HEAD) for _ in range(N_LAYER)])
+        self.blocks = nn.Sequential(*[Block(N_EMBD, n_head=N_HEAD) for _ in range(N_LAYER)])
         
         # final layer norm
         self.ln_f = nn.LayerNorm(N_EMBD)
 
         # the final layer (head) of the lm that converts the context-aware token vector into a score for every vocab
         # initialises a weight for each embedding cell (columns) across each possible vocab token (row) + bias
-        # it can then be used as a fn that runs: logits =  x @ weight.T + bias (one score per context-aware token)
+        # it can then be used as a fn that runs: logits =  x @ weight.T + bias (one score per vocab token, at each position)
                                                          # x is (B, T, N), the output of the transformer blocks
         self.lm_head = nn.Linear(N_EMBD, VOCAB_SIZE) # (B, T, VOCAB_SIZE)
 
 
-    def forward(self, tok_sequence: torch.Tensor, target_tokens: torch.Tensor=None) -> torch.Tensor:
+    def forward(
+        self, tok_sequence: torch.Tensor, target_tokens: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """ Generate logits for the next-token predictions. """
 
         B, T = tok_sequence.shape
@@ -303,6 +306,9 @@ class BigramLanguageModel(nn.Module):
         # run through transformer layers so each token vector becomes context-aware
         x = self.blocks(x) # (B, T, C)
 
+        # final layer norm before the lm_head
+        x = self.ln_f(x) # (B, T, C)
+
         # runs on each of the (B, T) positions, and produces a logit (score) for each potential output token (C)
         logits = self.lm_head(x) # (B, T, C = VOCAB_SIZE)
 
@@ -315,15 +321,15 @@ class BigramLanguageModel(nn.Module):
             logits = logits.view(B*T, C)
             target_tokens = target_tokens.view(B*T)
 
-            # Negative Log Likelihood (NLL) loss
+            # cross-entropy = softmax + Negative Log Likelihood (NLL) loss
             loss = F.cross_entropy(logits, target_tokens)
 
         return logits, loss
 
-    def generate(self, tok_sequence, max_new_toks):
+    def generate(self, tok_sequence: torch.Tensor, max_new_toks: int) -> torch.Tensor:
         """
         Given some tokens, repeatedly predict the next token, add it to the sequence, and repeat.
-        This is inference/generation, not training. The weightghts are already trained.
+        This is inference/generation, not training. The weights are already trained.
         """
         # tok_sequence is (B, T) array of indices
         for _ in range(max_new_toks): # (1) the _ (2) the cat _ (3) the cat sat _ (4) the cat sat on _ ...
@@ -335,8 +341,6 @@ class BigramLanguageModel(nn.Module):
             logits, _ = self(tok_sequence_cond) # (B, T, C)
 
             # focus only on the last time step (we only care about predicting the next token)
-            # NOTE: for a bigram model, it is silly that we pass in the full history when it only needs the nth token
-            #       however, it will generalise better to other models
             logits = logits[:, -1, :] # becomes (B,C)
 
             # apply softmax to convert scores into probabilities that sum to 1
@@ -351,25 +355,24 @@ class BigramLanguageModel(nn.Module):
         return tok_sequence
             
 
-model = BigramLanguageModel()
-m = model.to(DEVICE)
+model = TransformerLanguageModel().to(DEVICE)
 
 # ===========================
 # ===== TRAINING  ===========
 # ===========================
 
 # create a PyTorch optimizer
-optimizer = torch.optim.AdamW(m.parameters(), lr=LEARNING_RATE) # params are the embedding table weights (vocab size, vocab size)
+optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE) # params are all learnable weights (embeddings, attention, ffwd, layer norms, lm_head)
 
 ON = True
 
 if ON:
-    for iter in range(MAX_ITERS):
+    for step in range(MAX_ITERS):
 
         # occasionally evaluate the loss on train and test sets
-        if iter % EVAL_INTERVAL == 0:
+        if step % EVAL_INTERVAL == 0:
             losses = estimate_loss()
-            print(f"step {iter}: train loss {losses['train']:.4f}, test loss {losses['test']:.4f}")
+            print(f"step {step}: train loss {losses['train']:.4f}, test loss {losses['test']:.4f}")
 
         # sample a batch of data
         xb, yb = get_batch("train")
@@ -383,11 +386,14 @@ if ON:
         # calculating this step's gradients (how much should each weight move to reduce the loss)
         loss.backward()
 
-        # actually change all of the weightghts
+        # actually change all of the weights
         optimizer.step()
 
+    # final evaluation after the last training step
+    losses = estimate_loss()
+    print(f"step {MAX_ITERS}: train loss {losses['train']:.4f}, test loss {losses['test']:.4f}")
 
-# Print: starting from a single token (ID 0) and generate 100 new tokens
+# Print: starting from a single token (ID 0) and generate 500 new tokens
 context = torch.zeros((1, 1), dtype=torch.long, device=DEVICE)
-generated = m.generate(context, max_new_toks=500)
+generated = model.generate(context, max_new_toks=500)
 print(decode(generated[0].tolist()))
